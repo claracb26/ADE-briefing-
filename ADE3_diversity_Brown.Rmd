@@ -1,0 +1,467 @@
+---
+title: "ADE3 Step 3 worksheet: quantifying diversity"
+author: "Clara Brown"
+date: "Thursday 29 October 2026"
+output:
+  html_document:
+    toc: true
+---
+
+## How to use this worksheet
+
+1.  Save a copy with your surname (for example, `ADE3_diversity_Smith.Rmd`) in the same folder as `ADE3_class_data_frozen.csv`.
+2.  Work through the sections in order, alongside the handout. Run a whole chunk by clicking its green arrow, or run a single line with Ctrl+Enter (Cmd+Enter on a Mac). Read the output before moving on.
+3.  Type your answers after each "Answer:" line.
+4.  When you have finished, click Knit to produce a record of your code, output and answers. Keep this file: it is part of your analytical working for the briefing note.
+
+## Set up R
+
+Run this chunk first. If R asks about a personal library, type `yes` both times.
+
+```{r setup-packages}
+# Install each package if it is missing (only happens once per computer), then load it
+if (!require(tidyverse)) install.packages("tidyverse", repos = "https://cloud.r-project.org")
+if (!require(vegan)) install.packages("vegan", repos = "https://cloud.r-project.org")
+#install.packages(c("ggspatial", "osmdata", "sf", "rosm", "prettymapr"), repos = "https://cloud.r-project.org")
+```
+
+```{r load-libraries}
+library(tidyverse)
+library(vegan)  
+library(ggplot2)
+library(ggspatial)
+library(sf)
+library(osmdata)
+library(dplyr)
+library(tidyr)
+library(leaflet)
+library(htmlwidgets)
+library(htmltools)
+
+
+
+# This should print TRUE. If it prints FALSE, check the CSV is in the same folder as this file.
+file.exists("ADE_class_data_frozen.csv")
+```
+
+## 3.1 What Shannon and Simpson measure
+
+Calculate $H'$ and $1 - D$ by hand for each community first, then check your answers.
+
+-   Community A: three species with counts 5, 3 and 2.
+-   Community B: four species with counts 7, 1, 1 and 1.
+
+```{r mini-problem}
+diversity(c(5, 3, 2))                         # Shannon H', community A
+diversity(c(7, 1, 1, 1))                      # Shannon H', community B
+diversity(c(5, 3, 2), index = "simpson")      # Gini-Simpson (1 - D), community A
+diversity(c(7, 1, 1, 1), index = "simpson")   # Gini-Simpson (1 - D), community B
+```
+
+Which community has more species? Which is more diverse? Why do these differ?
+
+Answer: A is more diverse but B has more species, this is because B has very low
+eveness
+
+## 3.2 Load and clean the class data
+
+A "New names" message is expected when the file is read, because two columns have no header.
+
+```{r load-data}
+arth <- read_csv("ADE_class_data_26.csv",
+                 col_types = cols(.default = "c"),   # read every column as text
+                 na = c("", "NA", "-", "n/a")) %>%   # treat blanks and placeholders as missing
+  rename(Surname = 1) %>%                            # name the unheaded first column
+  select(-starts_with("...")) %>%                    # drop the empty unnamed column
+  filter(!is.na(Initials))                           # drop blank rows
+
+nrow(arth)    # number of specimen records
+names(arth)   # check the column names
+```
+
+Standardise the names, separate lat/long then apply the corrections table.
+
+```{r clean-data}
+# Standardise capitalisation and remove stray spaces
+arth <- arth %>%
+  mutate(across(matches("^(Class|Order|Family|Genus)_"), ~ str_to_title(str_squish(.x))),
+         Habitat = str_to_title(str_squish(Habitat)))
+
+
+# Corrections: each entry reads "as typed" = "corrected". Add any new ones you find.
+fixes <- c(
+  # Class
+  "Insects" = "Insecta", "Insect" = "Insecta",
+  "Pancrustacea" = "Insecta",                # Pancrustacea is above class level
+  "Malacosraca" = "Malacostraca",
+  # Order
+  "Harvestmen" = "Opiliones", "Opilones" = "Opiliones", "Opilinoes" = "Opiliones",
+  "Neuropotera" = "Neuroptera", "Diptera (True Flies)" = "Diptera",
+  # Family
+  "Phalangiid" = "Phalangiidae", "Phalangiid Harvestman" = "Phalangiidae",
+  "Syphridae" = "Syrphidae", "Scathophlagidae" = "Scathophagidae",
+  "Aculeta" = "Vespidae",                    # Aculeata is an infraorder, typed in the Family column
+  "Sclerosomatidae/Phalangiidae" = "Sclerosomatidae",   # Leiobunum is a sclerosomatid
+  # Genus
+  "Procellio" = "Porcellio", "Episyrphyus" = "Episyrphus",
+  # Habitat
+  "Outside Ashworth" = "Ashworth Trees",     # same coordinates as an Ashworth Trees record
+  "Ashworth Medows" = "Ashworth Meadows",
+  "Nucleus" = "Nucleus Mound", "Nucleus Mounds" = "Nucleus Mound",
+  "Murchison House" = "Murchison",
+  "Caeciliusoidea" = "Caeciliusidae"
+)
+
+# Replace any name found in the corrections table; keep all other names as they are
+arth <- arth %>%
+  mutate(across(c(matches("^(Class|Order|Family|Genus)_"), Habitat),
+                ~ coalesce(unname(fixes[.x]), .x)))
+```
+
+
+```{r clean-lat-long}
+# Separate latitude and longitude data
+arth1 <- arth |> 
+  separate(Lat_long, into = c("lat", "lon"), sep = ",", remove = FALSE)
+
+
+# Remove directional letters 
+
+arth1 <- arth1 |>
+  mutate(
+    lat = as.numeric(str_extract(lat, "[0-9]+\\.?[0-9]*")),
+    lon = as.numeric(str_extract(lon, "[0-9]+\\.?[0-9]*"))
+  )
+
+# add negatives to longitude
+
+arth1 <- arth1 |>
+  mutate(
+    lon = if_else(lon>0, -lon, lon)
+  )
+```
+
+Check what is left. Look for typos, near-duplicates and names at the wrong rank.
+
+```{r check-data}
+count(arth, Habitat, sort = TRUE)
+count(arth, Family_Morphology, sort = TRUE)
+count(arth, Family_AI, sort = TRUE)
+count(arth, Family_DNA, sort = TRUE)
+```
+
+Did you find any names that still need correcting? If so, add them to `fixes` and rerun the clean-data chunk.
+
+Answer: "Caeciliusoidea" = "Caeciliusidae"
+
+Look at the `Lat_long` values for Ashworth Meadows, Behind Ashworth and Nucleus Mound. Are these really separate places? What does that mean for comparing them?
+
+Answer: They do seem to be somewhat separate
+
+```{r plot-data}
+nrow(arth1)
+arth_map_df <- arth1 |>
+  filter(lat >=55.6)
+nrow(arth_map_df)
+pal <- colorFactor("Set1", domain = arth_map_df$Habitat)
+  
+leaflet(arth_map_df) |>
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") |>
+  addProviderTiles(providers$OpenStreetMap, group = "Street map") |>
+  addCircleMarkers(
+    lng = ~lon, lat = ~lat,
+    color = ~pal(Habitat),
+    radius = 5, fillOpacity = 0.9, stroke = TRUE, weight = 1,
+    popup = ~paste("Habitat:", Habitat)
+  ) |>
+  addLegend("bottomright", pal = pal, values = ~Habitat, title = "Habitat") |>
+  addLayersControl(baseGroups = c("Satellite", "Street map"))
+```
+
+##combine ashworth meadows and behind ashworth (geogrpahically the same)
+```{r clean-data-for-map}
+arth2 <- arth1 |>
+  mutate(
+    Habitat = if_else(Habitat == "Behind Ashworth", "Ashworth Meadows", Habitat)
+  )
+```
+
+
+```{r re-plot-map-df}
+
+#df with one row per habitat with each habitat's H (Shannon div index)
+div_df <- tibble(
+  Habitat = c("Ashworth Meadows", 
+              "Nucleus Mound", 
+              "Ashworth Trees", 
+              "Murchison",
+              "Secret Garden"),
+  H = c(2.40, 2.30, 2.20, 1.98, 2.02)
+)
+#label position = lat/lon of median value from each habitat
+centres <- arth2 |>
+  group_by(Habitat) |>
+  summarise(lat = median(lat), lon = median(lon)) |>
+  left_join(div_df, by = "Habitat")
+
+pal <- colorFactor("Set1", domain = arth2$Habitat)
+
+centres <- centres |>
+  mutate(col = pal(Habitat))
+
+alpha <- 0.6
+rgb_vals <- t(col2rgb(centres$col))
+centres$col_rgba <- sprintf("rgba(%d,%d,%d,%s)",
+                            rgb_vals[, 1], rgb_vals[, 2], rgb_vals[, 3], alpha)
+
+m1 <- leaflet(arth2) |>
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") |>
+  addProviderTiles(providers$OpenStreetMap, group = "Street map") |>
+  addCircleMarkers(
+    lng = ~lon, lat = ~lat,
+    color = ~pal(Habitat),
+    radius = 5, fillOpacity = 0.8, stroke = TRUE, weight = 1,
+    popup = ~paste("Habitat:", Habitat)
+  ) |>
+  addLabelOnlyMarkers(
+    data = centres, lng = ~lon, lat = ~lat,
+    label = lapply(seq_len(nrow(centres)), function(i) {
+      htmltools::HTML(paste0(
+        "<div style='background:", centres$col_rgba[i],
+        "; color:white; font-weight:bold; font-size:18px;",
+        " padding:2px 6px; border-radius:4px;'>",
+        "H' = ", round(centres$H[i], 2), "</div>"
+      ))
+    }),
+    labelOptions = labelOptions(
+      noHide = TRUE, direction = "top", textOnly = TRUE
+    )
+  ) |>
+  addLegend("bottomright", pal = pal, values = ~Habitat, title = "Habitat") |>
+  addLayersControl(baseGroups = c("Satellite", "Street map")) |>
+  htmlwidgets::prependContent(tags$style(HTML("
+    .leaflet-control.legend, .info.legend {
+      font-size: 18px;
+      line-height: 26px;
+      padding: 10px 14px;
+    }
+    .info.legend i {
+      width: 24px;
+      height: 24px;
+      margin-top: 2px;
+    }
+  ")))
+m1
+```
+
+```{r save-m1}
+
+saveWidget(m1, "index.html", selfcontained = TRUE)
+```
+
+## 3.3 Choose your taxonomic level and identification source
+
+```{r best-id}
+# Best available ID at each rank: DNA first, then morphology, then AI
+arth2 <- arth2 %>%
+  mutate(Class_Best  = coalesce(Class_DNA,  Class_Morphology,  Class_AI),
+         Order_Best  = coalesce(Order_DNA,  Order_Morphology,  Order_AI),
+         Family_Best = coalesce(Family_DNA, Family_Morphology, Family_AI),
+         Genus_Best  = coalesce(Genus_DNA,  Genus_Morphology,  Genus_AI))
+```
+
+Set the two choices that the rest of the analysis depends on.
+
+```{r choose-level}
+level     <- "Genus"   # "Class", "Order", "Family" or "Genus"
+id_source <- "Best"     # "Best", "DNA", "Morphology" or "AI"
+
+arth_lvl <- arth2 %>%
+  mutate(taxon = .data[[paste(level, id_source, sep = "_")]]) %>%
+  filter(!is.na(taxon), !is.na(Habitat))
+
+nrow(arth2)       # all specimen records
+nrow(arth_lvl)   # records identified at your chosen level
+```
+
+How many specimens did you lose by choosing this level?
+
+Answer: three specimens lost
+
+Compare the identification sources at your chosen level.
+
+```{r compare-sources}
+sources <- c("AI", "Morphology", "DNA", "Best")
+
+data.frame(
+  source     = sources,
+  identified = sapply(sources, function(s) sum(!is.na(arth2[[paste(level, s, sep = "_")]]))),
+  taxa       = sapply(sources, function(s) n_distinct(arth2[[paste(level, s, sep = "_")]], na.rm = TRUE))
+)
+```
+
+Which method identified the most specimens at this level?
+
+Answer: AI identified the most at the Family level
+
+Why can you not compare the numbers in the `taxa` column directly between methods?
+
+Answer: Because there are differing numbers of identified organisms from each 
+method
+
+## 3.4 Diversity by habitat
+
+```{r diversity-by-habitat}
+# Community matrix: one row per habitat, one column per taxon, cells are counts
+comm <- arth_lvl %>%
+  count(Habitat, taxon) %>%
+  pivot_wider(names_from = taxon, values_from = n, values_fill = 0) %>%
+  column_to_rownames("Habitat")
+
+N <- rowSums(comm)                       # specimens per habitat
+S <- specnumber(comm)                    # richness
+H <- diversity(comm, index = "shannon")  # Shannon's H'
+J <- H / log(S)                          # Pielou's evenness (NaN if S = 1)
+G <- diversity(comm, index = "simpson")  # Gini-Simpson, 1 - D
+
+div_table <- data.frame(N, S, H = round(H, 2), J = round(J, 2), Simpson = round(G, 2))
+div_table
+```
+
+Which habitat has the highest richness? Which has the highest $H'$? If the answers differ, use $J'$ to explain why.
+
+Answer: Ashworth Meadows and Nucleus Mound had the highest richness (have the 
+same H). Nucleus Mound has the highest J. 
+
+Note two records, habitats or taxa that you might discuss in your briefing note.
+
+Answer: The possible overlap between Ashworth areas and Nucleus Mound
+
+Quick check: several Secret Garden specimens are shield bugs collected from the same bushes, and each student chose one specimen to collect. What does the shield bug count actually measure? What does that mean for interpreting $H'$ and Simpson here?
+
+Answer: The Secret Garden measure is closer to the diversity of insect species 
+on cottoneaster bushes. This means richness will be lower.
+
+Using H and J in regards to our analysis because H is robust to missing data
+and is more sensitive to rare species which may be present on campus
+
+## 3.5 Sampling effort and rarefaction
+
+```{r rarefaction}
+N   # check specimens per habitat first
+
+# Habitats with very few specimens drag every habitat down to a tiny sample size.
+# If needed, drop them before rarefying by removing the # from the next two lines:
+# comm <- comm[N > 5, ]
+# N <- rowSums(comm)
+
+rarefy(comm, sample = min(N))            # expected taxa at equal sample size
+rarecurve(comm, step = 1, label = TRUE)  # rarefaction curve for each habitat
+```
+
+Does the ranking of habitats change after rarefaction? If so, what does that tell you about the raw comparison in section 3.4?
+
+Answer: Yes the ranking changes, this means raw comparison may have some bias
+toward more sampled habitats and therefore may not be as accurate
+
+Quick check: Ashworth Trees yielded far more specimens and more families than Ashworth Meadows. What would you check before agreeing that the trees support greater arthropod diversity?
+
+Answer: Making sure that the two areas are distinct based on the latitude and 
+longitude.
+
+## 3.6 Collector's curve
+
+```{r specimen-matrix}
+# Matrix with one row per specimen
+spec_mat <- arth_lvl %>%
+  mutate(specimen = row_number(), present = 1) %>%
+  select(specimen, taxon, present) %>%
+  pivot_wider(names_from = taxon, values_from = present, values_fill = 0) %>%
+  select(-specimen)
+```
+
+```{r collectors-curve}
+# Two curves: the order in the sheet, and the average of 100 random orders
+set.seed(1)
+curve_order  <- specaccum(spec_mat, method = "collector")
+curve_random <- specaccum(spec_mat, method = "random", permutations = 100)
+
+# Extract the numbers from each curve into a data frame for ggplot
+random_df <- tibble(specimens = curve_random$sites,
+                    taxa      = curve_random$richness,
+                    sd        = curve_random$sd)
+
+order_df  <- tibble(specimens = curve_order$sites,
+                    taxa      = curve_order$richness)
+
+# Build the plot and store it, so it can be saved in section 3.7
+curve_plot <- ggplot() +
+  geom_ribbon(data = random_df,
+              aes(x = specimens, ymin = taxa - 2 * sd, ymax = taxa + 2 * sd),
+              fill = "lightblue") +
+  geom_line(data = random_df,
+            aes(x = specimens, y = taxa, colour = "random"),
+            linewidth = 1) +
+  geom_line(data = order_df,
+            aes(x = specimens, y = taxa, colour = "sheet"),
+            linewidth = 1) +
+  scale_colour_manual(values = c(random = "blue", sheet = "red"),
+                      labels = c(random = "Random order (mean \u00B1 2 SD)",   # \u00B1 is the ± sign
+                                 sheet  = "Sheet order")) +
+  labs(x = "Specimens identified",
+       y = paste0("Cumulative number of taxa (", level, ")"),
+       colour = NULL) +
+  theme_classic() +
+  theme(legend.position = "bottom")
+
+curve_plot
+
+# Estimate total richness from rare taxa (singletons and doubletons)
+estimateR(colSums(spec_mat))
+```
+
+Does the red curve differ from the blue curve? Why does randomising the order give a fairer curve?
+
+Answer: The trend in the same direction but the red curve is more wobbly. Making
+the order random means that historical bias of when species were entered into
+the data sheet is eliminated.
+
+Has the blue curve leveled off?
+
+Answer: No
+
+Compare S.obs with S.chao1. Roughly what proportion of taxa have we detected?
+
+Answer: We have detected roughly 45% of the taxa present 
+
+If we identified another 50 specimens, would you expect new taxa? Use the slope at the right-hand end of the curve to justify your answer.
+
+Answer: Yes because the slope has not yet leveled out with the number of taxa
+per specimens identified
+
+Quick check: a curve at Order level has completely levelled off. Does this mean we have sampled all the arthropod species on campus?
+
+Answer: No, it means we have good sample of the number of families present 
+
+## 3.7.1 Save your outputs
+
+The file names record your chosen level and source, so outputs from different runs do not overwrite each other.
+
+```{r save-outputs}
+# Diversity table
+write_csv(rownames_to_column(div_table, "Habitat"),
+          paste0("diversity_table_", level, "_", id_source, ".csv"))
+
+# Collector's curve
+ggsave(paste0("collectors_curve_", level, "_", id_source, ".png"),
+       plot = curve_plot, width = 8, height = 6, dpi = 200)
+
+# Rarefaction curves (still drawn with base graphics)
+png(paste0("rarefaction_", level, "_", id_source, ".png"),
+    width = 1600, height = 1200, res = 200)
+rarecurve(comm, step = 1, label = TRUE)
+dev.off()
+```
+
+
+Finally, save this file (Ctrl+S) and click Knit to produce a record of your working. Rerun the worksheet on the final cleaned dataset before writing your briefing note.
